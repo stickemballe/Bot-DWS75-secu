@@ -75,17 +75,24 @@ def check_security(bot: TeleBot, message):
         add_infraction(uid, bot, "Contenu interdit")
         return False
 
-    # Mise à jour dernier message
-    user_infractions.setdefault(uid, {})["last_time"] = now
+    # Mise à jour dernier message + garantie de la clé 'count'
+    store = user_infractions.setdefault(uid, {})
+    store["last_time"] = now
+    if "count" not in store:
+        store["count"] = 0
     return True
 
 # === Ajouter une infraction ===
 def add_infraction(uid, bot: TeleBot, reason):
-    data = user_infractions.setdefault(uid, {"count": 0})
-    data["count"] += 1
+    data = user_infractions.setdefault(uid, {})
+    data["count"] = data.get("count", 0) + 1  # sécurise l'incrément
+    user_infractions[uid] = data
+
     logging.warning(f"Infraction {reason} pour utilisateur {uid}")
+
     if uid == ADMIN_ID:
         return
+
     if data["count"] >= MAX_INFRACTIONS:
         blacklist.add(uid)
         bot.send_message(uid, "🚫 Trop d'infractions, vous êtes bloqué.")

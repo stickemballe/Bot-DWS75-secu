@@ -94,7 +94,7 @@ def send_welcome(message):
     bot.send_photo(chat_id, IMAGE_ACCUEIL_URL)
     texte_accueil = (
         "<b><u>🤖 Bienvenue sur le Bot DWS75 🤖</u></b>\n\n"
-        "<b><u>💫 DryWeedShop - Depuis 2019 💫</u></b>\n\n"
+        "<b><u>💫 DWS75 - Depuis 2019 💫</u></b>\n\n"
         "Cliquez sur les boutons ci-dessous pour accéder à notre <b><u>menu interactif</u></b>, nous contacter ou trouver les infos utiles : 👇"
     )
     msg = bot.send_message(chat_id, texte_accueil, parse_mode='HTML', reply_markup=menu_principal_keyboard(uid))
@@ -182,3 +182,4 @@ def callback_handler(call):
 keep_alive()
 print("Bot en ligne avec sécurité...")
 bot.infinity_polling(skip_pending=True)
+

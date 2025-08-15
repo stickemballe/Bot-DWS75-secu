@@ -11,6 +11,9 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 bot = telebot.TeleBot(TOKEN)
 
+# IMPORTANT: désactive tout webhook résiduel pour éviter le conflit 409
+bot.remove_webhook()
+
 # === Serveur pour UptimeRobot ===
 app = Flask('')
 
@@ -19,7 +22,9 @@ def home():
     return "Bot actif avec sécurité"
 
 def run():
-    app.run(host='0.0.0.0', port=8080)
+    # ⚠️ Railway fournit un PORT via variable d'env
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
 
 def keep_alive():
     Thread(target=run).start()

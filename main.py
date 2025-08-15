@@ -51,7 +51,7 @@ def menu_principal_keyboard(uid):
 
 def infoscommande_keyboard():
     kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(InlineKeyboardButton("🛒 Commander 🛒", url="https://wa.me/33777824705"))
+    kb.add(InlineKeyboardButton("🛒 Commander 🛒", url=WHATSAPP_LINK))
     kb.row(InlineKeyboardButton("◀️ Retour", callback_data="menu_principal"),
            InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_principal"))
     return kb
@@ -88,8 +88,8 @@ def send_welcome(message):
             pass
     bot.send_photo(chat_id, IMAGE_ACCUEIL_URL)
     texte_accueil = (
-        "<b><u>🤖 Bienvenue sur notre Bot 2.0 🤖</u></b>\n\n"
-        "<b><u>💫 DWS75 - Depuis 2019 💫</u></b>\n\n"
+        "<b><u>🤖 Bienvenue sur le Bot DWS75 🤖</u></b>\n\n"
+        "<b><u>💫 DryWeedShop - Depuis 2019 💫</u></b>\n\n"
         "Cliquez sur les boutons ci-dessous pour accéder à notre <b><u>menu interactif</u></b>, nous contacter ou trouver les infos utiles : 👇"
     )
     msg = bot.send_message(chat_id, texte_accueil, parse_mode='HTML', reply_markup=menu_principal_keyboard(uid))

@@ -14,7 +14,7 @@ bot = telebot.TeleBot(TOKEN)
 # IMPORTANT: désactive tout webhook résiduel pour éviter le conflit 409
 bot.remove_webhook()
 
-# === Serveur pour UptimeRobot ===
+# === Serveur pour UptimeRobot / Railway ===
 app = Flask('')
 
 @app.route('/')
@@ -22,7 +22,7 @@ def home():
     return "Bot actif avec sécurité"
 
 def run():
-    # ⚠️ Railway fournit un PORT via variable d'env
+    # Railway fournit le port via $PORT
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
@@ -104,10 +104,14 @@ def send_welcome(message):
 @bot.message_handler(commands=['start', 'menu', 'restart'])
 def command_handler(message):
     uid = message.from_user.id
-    if uid not in captcha_pending:
-        question = generate_captcha(uid)
-        bot.send_message(uid, f"🔐 Veuillez résoudre ce captcha pour continuer : {question}")
+
+    # ⚠️ Si un captcha est en cours -> on redemande la même question (on ne recrée pas)
+    if uid in captcha_pending:
+        q = captcha_pending[uid]["question"]
+        bot.send_message(uid, f"🔐 Veuillez résoudre ce captcha pour continuer : {q}")
         return
+
+    # Sinon on passe par la sécurité (anti-spam / filtrage). Si OK -> accueil.
     if not check_security(bot, message):
         return
     send_welcome(message)
@@ -116,10 +120,14 @@ def command_handler(message):
 @bot.message_handler(func=lambda m: True)
 def text_handler(message):
     uid = message.from_user.id
+
+    # Captcha en cours -> on valide
     if uid in captcha_pending:
         if validate_captcha(bot, message):
             send_welcome(message)
         return
+
+    # Sécurité globale
     if not check_security(bot, message):
         return
 
@@ -182,4 +190,3 @@ def callback_handler(call):
 keep_alive()
 print("Bot en ligne avec sécurité...")
 bot.infinity_polling(skip_pending=True)
-

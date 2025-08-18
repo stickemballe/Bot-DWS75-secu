@@ -7,6 +7,7 @@ import random
 from threading import Thread
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from html import escape  # ← pour sécuriser l'injection du prénom/pseudo dans du HTML
 
 from security import verify_turnstile, save_user_verification, is_verification_valid, is_flooding
 from handlers.menus import menu_principal_keyboard, verification_keyboard, infoscommande_keyboard, contacts_keyboard, liens_keyboard
@@ -17,6 +18,22 @@ allowed_origins = ["https://www.dws75shop.com", "https://dws75shop.com"]
 CORS(app, resources={r"/webapp/*": {"origins": allowed_origins}})
 
 short_code_storage = {}
+
+def _display_name_from_message(message) -> str:
+    """Récupère un nom affichable depuis l'objet message (first_name > username > 'toi')."""
+    raw = (getattr(message.from_user, "first_name", None)
+           or getattr(message.from_user, "username", None)
+           or "toi")
+    return escape(raw)
+
+def _display_name_from_id(user_id: int) -> str:
+    """Récupère un nom affichable depuis l'ID utilisateur via get_chat (fallback 'toi')."""
+    try:
+        chat = bot.get_chat(user_id)
+        raw = getattr(chat, "first_name", None) or getattr(chat, "username", None) or "toi"
+    except Exception:
+        raw = "toi"
+    return escape(raw)
 
 @app.route('/webapp/get-short-code', methods=['POST'])
 def get_short_code():
@@ -47,13 +64,20 @@ def command_start(message):
     user_id = message.from_user.id
     if is_flooding(user_id): return
 
+    # Toujours accueillir avec prénom/pseudo (même avant vérif)
+    name = _display_name_from_message(message)
+
     if is_verification_valid(user_id):
         send_welcome_message(message.chat.id, user_id)
     else:
-        texte_prompt = "🔒 **Bienvenue !**\n\nPour accéder au bot, une vérification rapide est nécessaire."
-        bot.send_message(message.chat.id, texte_prompt, reply_markup=verification_keyboard())
+        texte_prompt = (
+            f"🔒 <b>Bienvenue, {name} !</b>\n\n"
+            "Pour accéder au bot, une vérification rapide est nécessaire.\n\n"
+            "Appuie sur le bouton ci-dessous pour lancer la vérification."
+        )
+        bot.send_message(message.chat.id, texte_prompt, reply_markup=verification_keyboard(), parse_mode='HTML')
 
-# --- COMMANDE /aide CORRIGÉE AVEC TRIPLE GUILLEMETS ---
+# --- COMMANDE /aide (inchangée, format Markdown conservé) ---
 @bot.message_handler(commands=['aide'])
 def command_aide(message):
     user_id = message.from_user.id
@@ -87,24 +111,39 @@ def handle_short_code(message):
     if is_flooding(user_id): return
     
     code = message.text
+
+    # Nom pour les réponses (personnalisation)
+    name = _display_name_from_message(message)
+
     if is_verification_valid(user_id):
-        bot.reply_to(message, "✅ Vous êtes déjà vérifié.")
+        bot.reply_to(message, f"✅ <b>Vous êtes déjà vérifié, {name}.</b>", parse_mode='HTML')
         send_welcome_message(message.chat.id, user_id)
         return
 
     code_data = short_code_storage.get(code)
-    if code_data and time.time() < code_data["expires"] and code_data["user_id"] == user_id:
+    if code_data and time.time() < code_data["expires"] and str(code_data["user_id"]) == str(user_id):
         del short_code_storage[code]
         save_user_verification(user_id)
-        bot.reply_to(message, "✅ **Accès autorisé !**")
+        bot.reply_to(message, f"✅ <b>Accès autorisé, {name} !</b>", parse_mode='HTML')
         send_welcome_message(message.chat.id, user_id)
     else:
         bot.reply_to(message, "❌ Ce code est incorrect ou a expiré. Veuillez relancer avec /start.")
 
 def send_welcome_message(chat_id: int, user_id: int):
-    texte_accueil = "<b><u>🤖 Bienvenue sur le Bot DWS75 🤖</u></b>\n\nVous avez maintenant accès à toutes les fonctionnalités."
+    # Personnalisation via get_chat → OK en DM (chat privé)
+    name = _display_name_from_id(user_id)
+    texte_accueil = (
+        f"<b><u>🤖 Bienvenue, {name} ! 🤖</u></b>\n\n"
+        "Vous avez maintenant accès à toutes les fonctionnalités."
+    )
     try:
-        bot.send_photo(chat_id, config.IMAGE_ACCUEIL_URL, caption=texte_accueil, parse_mode='HTML', reply_markup=menu_principal_keyboard(user_id))
+        bot.send_photo(
+            chat_id,
+            config.IMAGE_ACCUEIL_URL,
+            caption=texte_accueil,
+            parse_mode='HTML',
+            reply_markup=menu_principal_keyboard(user_id)
+        )
     except Exception as e:
         config.logger.error(f"Impossible d'envoyer le message de bienvenue à {chat_id}: {e}")
 

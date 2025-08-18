@@ -55,6 +55,20 @@ def send_clean_photo(chat_id: int, photo, **kwargs):
     _remember_sent(chat_id, msg.message_id)
     return msg
 
+def send_ephemeral(chat_id: int, text: str, ttl: int = 3, **kwargs):
+    """
+    Envoie un petit message temporaire qui s'auto-supprime après ttl secondes.
+    N'entre pas dans la pile 'clean' pour ne pas être effacé immédiatement.
+    """
+    msg = bot.send_message(chat_id, text, **kwargs)
+    def _del():
+        try:
+            bot.delete_message(chat_id, msg.message_id)
+        except Exception:
+            pass
+    Timer(ttl, _del).start()
+    return msg
+
 def _display_name_from_message(message) -> str:
     raw = (getattr(message.from_user, "first_name", None)
            or getattr(message.from_user, "username", None)
@@ -161,8 +175,19 @@ def handle_short_code(message):
     if code_data and time.time() < code_data["expires"] and str(code_data["user_id"]) == str(user_id):
         del short_code_storage[code]
         save_user_verification(user_id)
-        # On n'ajoute pas un message intermédiaire ; on affiche directement l'accueil propre
+
+        # 🔔 Message de succès (éphémère 3s), personnalisé avec le prénom/pseudo
+        name = _display_name_from_message(message)
+        send_ephemeral(
+            message.chat.id,
+            f"✅ <b>Vérification réussie, {name} !</b>",
+            ttl=3,
+            parse_mode='HTML'
+        )
+
+        # Puis on affiche l'écran d'accueil propre (image + menu)
         send_welcome_message(message.chat.id, user_id)
+        return
     else:
         # On remplace l'écran courant par l'erreur (pour éviter l’empilement)
         send_clean_message(message.chat.id, "❌ Ce code est incorrect ou a expiré. Veuillez relancer avec /start.")

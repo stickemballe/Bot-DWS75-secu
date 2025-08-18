@@ -24,7 +24,7 @@ def save_user_verification(user_id: int):
     save_verified_users(verified_users)
     config.logger.info(f"Vérification enregistrée pour l'utilisateur {user_id}")
 
-def is_verification_valid(user_id: int) -> bool:
+def is_verification_valid(user_id: int):
     verified_users = load_verified_users()
     user_id_str = str(user_id)
     if user_id_str not in verified_users:
@@ -51,3 +51,23 @@ def verify_turnstile(token: str) -> bool:
     except requests.RequestException as e:
         config.logger.error(f"Erreur réseau Turnstile: {e}")
         return False
+
+# --- FONCTION ANTI-FLOOD AJOUTÉE ---
+user_requests = {} 
+def is_flooding(user_id: int, limit: int = 3, period: int = 2) -> bool:
+    """
+    Vérifie si un utilisateur envoie trop de requêtes.
+    Retourne True s'il dépasse la limite (par défaut, 3 requêtes en 2 secondes).
+    """
+    now = time.time()
+    if user_id not in user_requests:
+        user_requests[user_id] = []
+    
+    user_requests[user_id] = [t for t in user_requests[user_id] if now - t < period]
+    
+    if len(user_requests[user_id]) >= limit:
+        config.logger.warning(f"Flood détecté pour l'utilisateur {user_id}")
+        return True
+
+    user_requests[user_id].append(now)
+    return False

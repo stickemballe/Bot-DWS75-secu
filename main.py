@@ -4,10 +4,10 @@ import config
 import time
 import requests
 import random
-from threading import Thread
+from threading import Thread, Timer
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from html import escape  # ← pour sécuriser l'injection du prénom/pseudo dans du HTML
+from html import escape
 
 from security import verify_turnstile, save_user_verification, is_verification_valid, is_flooding
 from handlers.menus import menu_principal_keyboard, verification_keyboard, infoscommande_keyboard, contacts_keyboard, liens_keyboard
@@ -17,23 +17,59 @@ app = Flask('')
 allowed_origins = ["https://www.dws75shop.com", "https://dws75shop.com"]
 CORS(app, resources={r"/webapp/*": {"origins": allowed_origins}})
 
-short_code_storage = {}
+# --- Mémoire locale des messages envoyés par le bot (pour les effacer ensuite)
+#     Clé = chat_id, Valeur = liste d'IDs de messages envoyés par le bot
+_SENT_BY_BOT = {}
+_MAX_TRACKED = 10  # on garde une petite file pour sécurité
+
+def _remember_sent(chat_id: int, message_id: int):
+    lst = _SENT_BY_BOT.get(chat_id, [])
+    lst.append(message_id)
+    if len(lst) > _MAX_TRACKED:
+        lst = lst[-_MAX_TRACKED:]
+    _SENT_BY_BOT[chat_id] = lst
+
+def clear_chat_messages(chat_id: int):
+    """Supprime les anciens messages envoyés par le bot dans ce chat (ignore les erreurs)."""
+    lst = _SENT_BY_BOT.get(chat_id, [])
+    if not lst:
+        return
+    for mid in lst:
+        try:
+            bot.delete_message(chat_id, mid)
+        except Exception:
+            pass
+    _SENT_BY_BOT[chat_id] = []
+
+def send_clean_message(chat_id: int, text: str, **kwargs):
+    """Efface les anciens messages du bot puis envoie un nouveau message texte."""
+    clear_chat_messages(chat_id)
+    msg = bot.send_message(chat_id, text, **kwargs)
+    _remember_sent(chat_id, msg.message_id)
+    return msg
+
+def send_clean_photo(chat_id: int, photo, **kwargs):
+    """Efface les anciens messages du bot puis envoie une nouvelle photo (avec caption éventuelle)."""
+    clear_chat_messages(chat_id)
+    msg = bot.send_photo(chat_id, photo, **kwargs)
+    _remember_sent(chat_id, msg.message_id)
+    return msg
 
 def _display_name_from_message(message) -> str:
-    """Récupère un nom affichable depuis l'objet message (first_name > username > 'toi')."""
     raw = (getattr(message.from_user, "first_name", None)
            or getattr(message.from_user, "username", None)
            or "toi")
     return escape(raw)
 
 def _display_name_from_id(user_id: int) -> str:
-    """Récupère un nom affichable depuis l'ID utilisateur via get_chat (fallback 'toi')."""
     try:
         chat = bot.get_chat(user_id)
         raw = getattr(chat, "first_name", None) or getattr(chat, "username", None) or "toi"
     except Exception:
         raw = "toi"
     return escape(raw)
+
+short_code_storage = {}
 
 @app.route('/webapp/get-short-code', methods=['POST'])
 def get_short_code():
@@ -49,8 +85,9 @@ def get_short_code():
 
     while True:
         code = str(random.randint(100000, 999999))
-        if code not in short_code_storage: break
-    
+        if code not in short_code_storage:
+            break
+
     short_code_storage[code] = {"user_id": user_id, "expires": time.time() + 300}
     config.logger.info(f"Code court {code} généré pour l'utilisateur {user_id}.")
     return jsonify({"ok": True, "short_code": code})
@@ -62,9 +99,9 @@ def home():
 @bot.message_handler(commands=['start', 'menu'])
 def command_start(message):
     user_id = message.from_user.id
-    if is_flooding(user_id): return
+    if is_flooding(user_id):
+        return
 
-    # Toujours accueillir avec prénom/pseudo (même avant vérif)
     name = _display_name_from_message(message)
 
     if is_verification_valid(user_id):
@@ -75,13 +112,14 @@ def command_start(message):
             "Pour accéder au bot, une vérification rapide est nécessaire.\n\n"
             "Appuie sur le bouton ci-dessous pour lancer la vérification."
         )
-        bot.send_message(message.chat.id, texte_prompt, reply_markup=verification_keyboard(), parse_mode='HTML')
+        # On nettoie puis on affiche uniquement le prompt de vérif
+        send_clean_message(message.chat.id, texte_prompt, reply_markup=verification_keyboard(), parse_mode='HTML')
 
-# --- COMMANDE /aide (inchangée, format Markdown conservé) ---
 @bot.message_handler(commands=['aide'])
 def command_aide(message):
     user_id = message.from_user.id
-    if is_flooding(user_id): return
+    if is_flooding(user_id):
+        return
 
     texte_aide = """
 ❓ **Mode d'emploi du bot** ❓
@@ -103,20 +141,19 @@ Une fois vérifié, vous aurez accès à toutes nos options :
 
 En cas de problème, vous pouvez toujours relancer le processus avec la commande /start.
 """
-    bot.reply_to(message, texte_aide, parse_mode='Markdown')
+    # On remplace l'écran courant par l'aide (pas de pile de messages)
+    send_clean_message(message.chat.id, texte_aide, parse_mode='Markdown')
 
 @bot.message_handler(func=lambda message: message.text and message.text.isdigit() and len(message.text) == 6)
 def handle_short_code(message):
     user_id = message.from_user.id
-    if is_flooding(user_id): return
-    
+    if is_flooding(user_id):
+        return
+
     code = message.text
 
-    # Nom pour les réponses (personnalisation)
-    name = _display_name_from_message(message)
-
     if is_verification_valid(user_id):
-        bot.reply_to(message, f"✅ <b>Vous êtes déjà vérifié, {name}.</b>", parse_mode='HTML')
+        # Pas de message "déjà vérifié" pour éviter le bruit : on montre directement l'écran principal
         send_welcome_message(message.chat.id, user_id)
         return
 
@@ -124,20 +161,21 @@ def handle_short_code(message):
     if code_data and time.time() < code_data["expires"] and str(code_data["user_id"]) == str(user_id):
         del short_code_storage[code]
         save_user_verification(user_id)
-        bot.reply_to(message, f"✅ <b>Accès autorisé, {name} !</b>", parse_mode='HTML')
+        # On n'ajoute pas un message intermédiaire ; on affiche directement l'accueil propre
         send_welcome_message(message.chat.id, user_id)
     else:
-        bot.reply_to(message, "❌ Ce code est incorrect ou a expiré. Veuillez relancer avec /start.")
+        # On remplace l'écran courant par l'erreur (pour éviter l’empilement)
+        send_clean_message(message.chat.id, "❌ Ce code est incorrect ou a expiré. Veuillez relancer avec /start.")
 
 def send_welcome_message(chat_id: int, user_id: int):
-    # Personnalisation via get_chat → OK en DM (chat privé)
     name = _display_name_from_id(user_id)
     texte_accueil = (
         f"<b><u>🤖 Bienvenue, {name} ! 🤖</u></b>\n\n"
         "Vous avez maintenant accès à toutes les fonctionnalités."
     )
     try:
-        bot.send_photo(
+        # On remplace l’écran courant par l’image d’accueil + menu
+        send_clean_photo(
             chat_id,
             config.IMAGE_ACCUEIL_URL,
             caption=texte_accueil,
@@ -150,10 +188,12 @@ def send_welcome_message(chat_id: int, user_id: int):
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
     user_id = call.from_user.id
-    if is_flooding(user_id): return
-    
+    if is_flooding(user_id):
+        return
+
     chat_id = call.message.chat.id
     message_id = call.message.message_id
+
     if not is_verification_valid(user_id):
         bot.answer_callback_query(call.id, "Veuillez d'abord vous vérifier avec /start.", show_alert=True)
         return
@@ -162,6 +202,7 @@ def callback_handler(call):
     data = call.data
 
     if data == "menu_principal":
+        # On supprime explicitement le message actuel (si possible), puis on affiche l'accueil propre
         try:
             bot.delete_message(chat_id, message_id)
         except Exception as e:
@@ -169,6 +210,7 @@ def callback_handler(call):
         send_welcome_message(chat_id, user_id)
 
     elif data == "submenu_infoscommande":
+        # On préfère ÉDITER pour éviter d’empiler des messages (1 seul message visuel vit)
         texte_infos = (
             "<b><u>ℹ️ Prise de commandes & Livraison</u></b>\n\n"
             "Les commandes se font via <b>WhatsApp Standard</b> de 10h à 19h.\n"
@@ -185,15 +227,61 @@ def callback_handler(call):
             "Pour toute réclamation, contactez le +33 6 20 83 26 23.\n\n"
             "Merci de votre confiance ! 🏆"
         )
-        bot.edit_message_caption(caption=texte_infos, chat_id=chat_id, message_id=message_id, reply_markup=infoscommande_keyboard(), parse_mode='HTML')
+        try:
+            bot.edit_message_caption(
+                caption=texte_infos,
+                chat_id=chat_id,
+                message_id=message_id,
+                reply_markup=infoscommande_keyboard(),
+                parse_mode='HTML'
+            )
+        except Exception:
+            # Si l'édition échoue (message ancien, etc.), on remplace proprement
+            send_clean_photo(
+                chat_id,
+                config.IMAGE_ACCUEIL_URL,
+                caption=texte_infos,
+                parse_mode='HTML',
+                reply_markup=infoscommande_keyboard()
+            )
 
     elif data == "submenu_contacts":
         texte_contacts = "<b><u>☎️ Contacts ☎️</u></b>\n\nPour toutes questions ou assistance, contactez-nous via WhatsApp :"
-        bot.edit_message_caption(caption=texte_contacts, chat_id=chat_id, message_id=message_id, reply_markup=contacts_keyboard(), parse_mode='HTML')
+        try:
+            bot.edit_message_caption(
+                caption=texte_contacts,
+                chat_id=chat_id,
+                message_id=message_id,
+                reply_markup=contacts_keyboard(),
+                parse_mode='HTML'
+            )
+        except Exception:
+            send_clean_photo(
+                chat_id,
+                config.IMAGE_ACCUEIL_URL,
+                caption=texte_contacts,
+                parse_mode='HTML',
+                reply_markup=contacts_keyboard()
+            )
 
     elif data == "submenu_liens":
         texte_liens = "<b><u>🌐 Liens Utiles 🌐</u></b>\n\nRetrouvez nos liens importants ci-dessous :"
-        bot.edit_message_caption(caption=texte_liens, chat_id=chat_id, message_id=message_id, reply_markup=liens_keyboard(), parse_mode='HTML')
+        try:
+            bot.edit_message_caption(
+                caption=texte_liens,
+                chat_id=chat_id,
+                message_id=message_id,
+                reply_markup=liens_keyboard(),
+                parse_mode='HTML'
+            )
+        except Exception:
+            send_clean_photo(
+                chat_id,
+                config.IMAGE_ACCUEIL_URL,
+                caption=texte_liens,
+                parse_mode='HTML',
+                reply_markup=liens_keyboard()
+            )
 
     else:
         bot.answer_callback_query(call.id, "Fonction en cours de développement.", show_alert=True)

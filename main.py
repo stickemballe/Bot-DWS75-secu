@@ -1,152 +1,103 @@
 import os
-from flask import Flask
-from threading import Thread
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
-from security import check_security, validate_captcha, generate_captcha, captcha_pending
+import config
+import time
+import requests
+import random
+from threading import Thread
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 
-# === Config Railway ===
-TOKEN = os.getenv("TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+from security import verify_turnstile, save_user_verification, is_verification_valid
+from handlers.menus import menu_principal_keyboard, verification_keyboard, infoscommande_keyboard, contacts_keyboard, liens_keyboard
 
-bot = telebot.TeleBot(TOKEN)
-
-# IMPORTANT: désactive tout webhook résiduel pour éviter le conflit 409
-bot.remove_webhook()
-
-# === Serveur pour UptimeRobot / Railway ===
+bot = telebot.TeleBot(config.BOT_TOKEN)
 app = Flask('')
+allowed_origins = ["https://www.dws75shop.com", "https://dws75shop.com"]
+CORS(app, resources={r"/webapp/*": {"origins": allowed_origins}})
+
+short_code_storage = {}
+
+@app.route('/webapp/get-short-code', methods=['POST'])
+def get_short_code():
+    data = request.json
+    turnstile_token = data.get('token')
+    user_id = data.get('user_id')
+
+    if not all([turnstile_token, user_id]):
+        return jsonify({"ok": False, "error": "Données manquantes"}), 400
+
+    if not verify_turnstile(turnstile_token):
+        return jsonify({"ok": False, "error": "Captcha invalide"}), 403
+
+    while True:
+        code = str(random.randint(100000, 999999))
+        if code not in short_code_storage: break
+    
+    short_code_storage[code] = {"user_id": user_id, "expires": time.time() + 300}
+    config.logger.info(f"Code court {code} généré pour l'utilisateur {user_id}.")
+    return jsonify({"ok": True, "short_code": code})
 
 @app.route('/')
 def home():
-    return "Bot actif avec sécurité"
+    return "Bot et API de session actifs."
 
-def run():
-    # Railway fournit le port via $PORT
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+@bot.message_handler(commands=['start', 'menu'])
+def command_start(message):
+    user_id = message.from_user.id
+    if is_verification_valid(user_id):
+        send_welcome_message(message.chat.id, user_id)
+    else:
+        texte_prompt = "🔒 **Bienvenue !**\n\nPour accéder au bot, une vérification rapide est nécessaire."
+        bot.send_message(message.chat.id, texte_prompt, reply_markup=verification_keyboard())
 
-def keep_alive():
-    Thread(target=run).start()
+@bot.message_handler(func=lambda message: message.text and message.text.isdigit() and len(message.text) == 6)
+def handle_short_code(message):
+    user_id = message.from_user.id
+    code = message.text
 
-# === Constantes ===
-IMAGE_ACCUEIL_URL = 'https://file.garden/aIhdnTgFPho75N46/image-acceuil-bot-tlgrm.jpg'
-MINIAPP_URL = 'https://dws75shop.com'
-WHATSAPP_LINK = 'https://wa.me/33777824705'
-
-user_last_message = {}
-
-# === Menus ===
-def menu_principal_keyboard(uid):
-    kb = InlineKeyboardMarkup(row_width=2)
-    buttons = [
-        InlineKeyboardButton("💫🛍 Menu Interactif 2.0 🛍💫", web_app=WebAppInfo(url=MINIAPP_URL)),
-        InlineKeyboardButton("ℹ️ Infos & Commande 📲", callback_data="submenu_infoscommande"),
-        InlineKeyboardButton("🛒 Commander 🛒", url=WHATSAPP_LINK),
-        InlineKeyboardButton("☎️ Contacts ☎️", callback_data="submenu_contacts"),
-        InlineKeyboardButton("🌐 Liens 🌐", callback_data="submenu_liens"),
-    ]
-    for btn in buttons[:3]:
-        kb.add(btn)
-    kb.add(buttons[3])
-    kb.add(buttons[4])
-    if uid == ADMIN_ID:
-        kb.add(InlineKeyboardButton("⚙️ Paramètres (ADMIN) ⚙️", callback_data="submenu_parametres"))
-    return kb
-
-def infoscommande_keyboard():
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(InlineKeyboardButton("🛒 Commander 🛒", url=WHATSAPP_LINK))
-    kb.row(InlineKeyboardButton("◀️ Retour", callback_data="menu_principal"),
-           InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_principal"))
-    return kb
-
-def contacts_keyboard():
-    kb = InlineKeyboardMarkup(row_width=1)
-    kb.add(InlineKeyboardButton("☎️ WhatsApp Standard ☎️", url="https://wa.me/33777824705"),
-           InlineKeyboardButton("🆘 S.A.V  🆘", url="https://wa.me/33620832623"))
-    kb.row(InlineKeyboardButton("◀️ Retour", callback_data="menu_principal"),
-           InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_principal"))
-    return kb
-
-def liens_keyboard():
-    kb = InlineKeyboardMarkup(row_width=1)
-    kb.add(
-        InlineKeyboardButton("📲 Canal Telegram Secours 📲", url="https://t.me/+jh3S21ricEY5N2U8"),
-        InlineKeyboardButton("🥔 Potato 🥔", url="https://dlptm.org/DWS75"),
-        InlineKeyboardButton("☎️ WhatsApp Standard ☎️", url="https://wa.me/33777824705"),
-        InlineKeyboardButton("📸 Instagram 📸", url="https://www.instagram.com/dryweedshopsigsh=aTR3b3lyb2Y3ZjJo&utm_source=qr"),
-        InlineKeyboardButton("👻 Snapchat 👻", url="https://snapchat.com/t/3ZCdfgNA")
-    )
-    kb.row(InlineKeyboardButton("◀️ Retour", callback_data="menu_principal"),
-           InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_principal"))
-    return kb
-
-# === Accueil ===
-def send_welcome(message):
-    chat_id = message.chat.id
-    uid = message.from_user.id
-    if chat_id in user_last_message:
-        try:
-            bot.delete_message(chat_id, user_last_message[chat_id])
-        except:
-            pass
-    bot.send_photo(chat_id, IMAGE_ACCUEIL_URL)
-    texte_accueil = (
-        "<b><u>🤖 Bienvenue sur le Bot DWS75 🤖</u></b>\n\n"
-        "<b><u>💫 DWS75 - Depuis 2019 💫</u></b>\n\n"
-        "Cliquez sur les boutons ci-dessous pour accéder à notre <b><u>menu interactif</u></b>, nous contacter ou trouver les infos utiles : 👇"
-    )
-    msg = bot.send_message(chat_id, texte_accueil, parse_mode='HTML', reply_markup=menu_principal_keyboard(uid))
-    user_last_message[chat_id] = msg.message_id
-
-# === Commandes ===
-@bot.message_handler(commands=['start', 'menu', 'restart'])
-def command_handler(message):
-    uid = message.from_user.id
-
-    # ⚠️ Si un captcha est en cours -> on redemande la même question (on ne recrée pas)
-    if uid in captcha_pending:
-        q = captcha_pending[uid]["question"]
-        bot.send_message(uid, f"🔐 Veuillez résoudre ce captcha pour continuer : {q}")
+    if is_verification_valid(user_id):
+        bot.reply_to(message, "✅ Vous êtes déjà vérifié.")
+        send_welcome_message(message.chat.id, user_id)
         return
 
-    # Sinon on passe par la sécurité (anti-spam / filtrage). Si OK -> accueil.
-    if not check_security(bot, message):
-        return
-    send_welcome(message)
+    code_data = short_code_storage.get(code)
+    
+    if code_data and time.time() < code_data["expires"] and code_data["user_id"] == user_id:
+        del short_code_storage[code]
+        save_user_verification(user_id)
+        bot.reply_to(message, "✅ **Accès autorisé !**")
+        send_welcome_message(message.chat.id, user_id)
+    else:
+        bot.reply_to(message, "❌ Ce code est incorrect ou a expiré. Veuillez relancer avec /start.")
 
-# === Gestion messages texte ===
-@bot.message_handler(func=lambda m: True)
-def text_handler(message):
-    uid = message.from_user.id
+def send_welcome_message(chat_id: int, user_id: int):
+    texte_accueil = "<b><u>🤖 Bienvenue sur le Bot DWS75 🤖</u></b>\n\nVous avez maintenant accès à toutes les fonctionnalités."
+    try:
+        bot.send_photo(chat_id, config.IMAGE_ACCUEIL_URL, caption=texte_accueil, parse_mode='HTML', reply_markup=menu_principal_keyboard(user_id))
+    except Exception as e:
+        config.logger.error(f"Impossible d'envoyer le message de bienvenue à {chat_id}: {e}")
 
-    # Captcha en cours -> on valide
-    if uid in captcha_pending:
-        if validate_captcha(bot, message):
-            send_welcome(message)
-        return
-
-    # Sécurité globale
-    if not check_security(bot, message):
-        return
-
-# === Callbacks ===
+# --- GESTIONNAIRE DES BOUTONS (CALLBACKS) MIS À JOUR ---
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
-    if not check_security(bot, call.message):
-        return
     chat_id = call.message.chat.id
-    data = call.data
-    if chat_id in user_last_message:
-        try:
-            bot.delete_message(chat_id, user_last_message[chat_id])
-        except:
-            pass
+    user_id = call.from_user.id
+    message_id = call.message.message_id
+
+    if not is_verification_valid(user_id):
+        bot.answer_callback_query(call.id, "Veuillez d'abord vous vérifier avec /start.", show_alert=True)
+        return
+
     bot.answer_callback_query(call.id)
+    data = call.data
 
     if data == "menu_principal":
-        send_welcome(call.message)
+        # Pour retourner au menu principal, on renvoie le message d'accueil
+        # Il est préférable de supprimer l'ancien message et d'en envoyer un nouveau
+        # car on ne peut pas "ré-ajouter" une photo qui a été modifiée.
+        bot.delete_message(chat_id, message_id)
+        send_welcome_message(chat_id, user_id)
 
     elif data == "submenu_infoscommande":
         texte_infos = (
@@ -164,29 +115,41 @@ def callback_handler(call):
             "Pour toute réclamation (problèmes sur le produit, produits oubliés, problème avec un livreur...)\n\n"
             "Merci de votre confiance et à bientôt ! 🏆"
         )
-        msg = bot.send_message(chat_id, texte_infos, parse_mode='HTML', reply_markup=infoscommande_keyboard())
-        user_last_message[chat_id] = msg.message_id
+        # On modifie la légende de la photo existante
+        bot.edit_message_caption(caption=texte_infos, chat_id=chat_id, message_id=message_id, reply_markup=infoscommande_keyboard(), parse_mode='HTML')
 
     elif data == "submenu_contacts":
         texte_contacts = (
             "<b><u>☎️ Contacts ☎️</u></b>\n\n"
             "Pour toutes questions ou assistance, contactez-nous via WhatsApp :"
         )
-        msg = bot.send_message(chat_id, texte_contacts, parse_mode='HTML', reply_markup=contacts_keyboard())
-        user_last_message[chat_id] = msg.message_id
+        bot.edit_message_caption(caption=texte_contacts, chat_id=chat_id, message_id=message_id, reply_markup=contacts_keyboard(), parse_mode='HTML')
 
     elif data == "submenu_liens":
         texte_liens = (
             "<b><u>🌐 Liens Utiles 🌐</u></b>\n\n"
             "Retrouvez nos liens importants ci-dessous :"
         )
-        msg = bot.send_message(chat_id, texte_liens, parse_mode='HTML', reply_markup=liens_keyboard())
-        user_last_message[chat_id] = msg.message_id
+        bot.edit_message_caption(caption=texte_liens, chat_id=chat_id, message_id=message_id, reply_markup=liens_keyboard(), parse_mode='HTML')
 
     else:
-        bot.answer_callback_query(call.id, "Fonction en cours de dev", show_alert=True)
+        bot.answer_callback_query(call.id, "Fonction en cours de développement.", show_alert=True)
 
-# === Lancement ===
-keep_alive()
-print("Bot en ligne avec sécurité...")
-bot.infinity_polling(skip_pending=True)
+# --- Lancement ---
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
+
+def run_bot():
+    while True:
+        try:
+            config.logger.info("Bot en cours de démarrage...")
+            bot.infinity_polling(skip_pending=True, timeout=60)
+        except Exception as e:
+            config.logger.error(f"Erreur polling: {e}. Redémarrage dans 15s...")
+            time.sleep(15)
+
+if __name__ == "__main__":
+    flask_thread = Thread(target=run_flask)
+    flask_thread.start()
+    run_bot()

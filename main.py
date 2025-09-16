@@ -12,7 +12,14 @@ from html import escape
 from security import verify_turnstile, save_user_verification, is_verification_valid, is_flooding
 from handlers.menus import menu_principal_keyboard, verification_keyboard, infoscommande_keyboard, contacts_keyboard, liens_keyboard
 
+# --- AJOUT: BDD abonnés ---
+from db import init_db, upsert_subscriber, get_all_chat_ids
+
 bot = telebot.TeleBot(config.BOT_TOKEN)
+
+# --- AJOUT: init BDD au démarrage ---
+init_db()
+
 app = Flask('')
 allowed_origins = ["https://www.dws75shop.com", "https://dws75shop.com"]
 CORS(app, resources={r"/webapp/*": {"origins": allowed_origins}})
@@ -112,6 +119,13 @@ def home():
 
 @bot.message_handler(commands=['start', 'menu'])
 def command_start(message):
+    # --- AJOUT: enregistrer l'utilisateur en BDD dès /start
+    try:
+        username = f"@{message.from_user.username}" if getattr(message.from_user, "username", None) else None
+        upsert_subscriber(message.chat.id, username)
+    except Exception as e:
+        config.logger.error(f"upsert_subscriber (/start) failed for {message.chat.id}: {e}")
+
     user_id = message.from_user.id
     if is_flooding(user_id):
         return
@@ -160,6 +174,13 @@ En cas de problème, vous pouvez toujours relancer le processus avec la commande
 
 @bot.message_handler(func=lambda message: message.text and message.text.isdigit() and len(message.text) == 6)
 def handle_short_code(message):
+    # --- AJOUT: enregistrer aussi ici (au cas où)
+    try:
+        username = f"@{message.from_user.username}" if getattr(message.from_user, "username", None) else None
+        upsert_subscriber(message.chat.id, username)
+    except Exception as e:
+        config.logger.error(f"upsert_subscriber (6digits) failed for {message.chat.id}: {e}")
+
     user_id = message.from_user.id
     if is_flooding(user_id):
         return
@@ -212,6 +233,13 @@ def send_welcome_message(chat_id: int, user_id: int):
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
+    # --- AJOUT: enregistrer l'utilisateur au clic de bouton
+    try:
+        username = f"@{call.from_user.username}" if getattr(call.from_user, "username", None) else None
+        upsert_subscriber(call.message.chat.id, username)
+    except Exception as e:
+        config.logger.error(f"upsert_subscriber (callback) failed for {call.message.chat.id}: {e}")
+
     user_id = call.from_user.id
     if is_flooding(user_id):
         return
@@ -309,19 +337,13 @@ def callback_handler(call):
     else:
         bot.answer_callback_query(call.id, "Fonction en cours de développement.", show_alert=True)
 
-# ------------------------ AJOUTS DEMANDÉS ------------------------
+# ------------------------ AJOUTS: commandes admin ------------------------
 
-# /broadcast (admin seulement) — envoie un texte OU copie le message auquel tu replies.
-# Remarque : sans base de destinataires, ce handler enverra dans le même chat.
+# /broadcast (admin) — envoie un texte OU copie le message auquel tu replies à TOUS les chat_id de la BDD
 @bot.message_handler(commands=['broadcast', 'diffuse'])
 def handle_broadcast(message):
-    # Vérif admin via config.is_admin (doit exister dans ton config.py)
     is_admin = getattr(config, "is_admin", None)
-    if callable(is_admin):
-        if not is_admin(message.from_user.id):
-            return bot.reply_to(message, "⛔ Commande réservée aux administrateurs.")
-    else:
-        # Si is_admin n'existe pas, on bloque par sécurité
+    if not callable(is_admin) or not is_admin(message.from_user.id):
         return bot.reply_to(message, "⛔ Commande réservée aux administrateurs.")
 
     args = message.text.split(maxsplit=1)
@@ -335,23 +357,36 @@ def handle_broadcast(message):
             "• ou répondez à un message (texte/photo/vidéo) avec `/broadcast`"
         )
 
-    # Ici, pas de liste d'abonnés → on envoie dans le même chat (minimal et sans changer le reste du code)
-    chat_id = message.chat.id
+    targets = get_all_chat_ids()
+    if not targets:
+        return bot.reply_to(message, "Aucun utilisateur enregistré : demande aux gens d’écrire au bot une première fois.")
 
-    if len(args) > 1:  # texte direct
-        text_to_send = args[1].strip()
-        try:
-            bot.send_message(chat_id, text_to_send, parse_mode="HTML")
-            bot.reply_to(message, "✅ Message envoyé.")
-        except Exception as e:
-            bot.reply_to(message, f"❌ Échec d'envoi : {e}")
-    else:  # copie du message répondu (préserve média & légende)
-        src = message.reply_to_message
-        try:
-            bot.copy_message(chat_id, src.chat.id, src.message_id)
-            bot.reply_to(message, "✅ Message copié.")
-        except Exception as e:
-            bot.reply_to(message, f"❌ Échec de copie : {e}")
+    bot.reply_to(message, f"🚀 Diffusion en cours vers {len(targets)} utilisateurs…")
+
+    def run():
+        sent, failed = 0, 0
+        if len(args) > 1:  # envoi texte
+            text_to_send = args[1].strip()
+            for cid in targets:
+                try:
+                    bot.send_message(cid, text_to_send, parse_mode="HTML")
+                    sent += 1
+                except Exception:
+                    failed += 1
+                time.sleep(0.05)
+        else:  # copie du message répondu
+            src = message.reply_to_message
+            for cid in targets:
+                try:
+                    bot.copy_message(cid, src.chat.id, src.message_id)
+                    sent += 1
+                except Exception:
+                    failed += 1
+                time.sleep(0.05)
+
+        bot.send_message(message.chat.id, f"✅ Envoyés: {sent} • ❌ Échecs: {failed}")
+
+    Thread(target=run, daemon=True).start()
 
 # /whoami — affiche ton ID et si tu es admin
 @bot.message_handler(commands=['whoami'])
@@ -365,7 +400,7 @@ def whoami(message):
             admin_flag = False
     bot.reply_to(message, f"Ton ID: {message.from_user.id}\nAdmin: {admin_flag}")
 
-# -----------------------------------------------------------------
+# -------------------------------------------------------------------------
 
 # --- Lancement ---
 def run_flask():

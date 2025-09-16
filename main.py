@@ -248,8 +248,6 @@ def callback_handler(call):
             "Nous livrons dans toute l'<b>Île-de-France</b> pour toute commande de 120€ ou plus.\n\n"
             "<b><u>📍 Meet-up (remise en main propre) :</u></b>\n"
             "Minimum de commande de 50€.\n\n"
-            "<b><u>🆘 Service Après-Vente (S.A.V) :</u></b>\n"
-            "Pour toute réclamation, contactez le +33 6 20 83 26 23.\n\n"
             "Merci de votre confiance ! 🏆"
         )
         try:
@@ -310,6 +308,64 @@ def callback_handler(call):
 
     else:
         bot.answer_callback_query(call.id, "Fonction en cours de développement.", show_alert=True)
+
+# ------------------------ AJOUTS DEMANDÉS ------------------------
+
+# /broadcast (admin seulement) — envoie un texte OU copie le message auquel tu replies.
+# Remarque : sans base de destinataires, ce handler enverra dans le même chat.
+@bot.message_handler(commands=['broadcast', 'diffuse'])
+def handle_broadcast(message):
+    # Vérif admin via config.is_admin (doit exister dans ton config.py)
+    is_admin = getattr(config, "is_admin", None)
+    if callable(is_admin):
+        if not is_admin(message.from_user.id):
+            return bot.reply_to(message, "⛔ Commande réservée aux administrateurs.")
+    else:
+        # Si is_admin n'existe pas, on bloque par sécurité
+        return bot.reply_to(message, "⛔ Commande réservée aux administrateurs.")
+
+    args = message.text.split(maxsplit=1)
+
+    # Aide si pas de texte et pas de réponse
+    if len(args) < 2 and not message.reply_to_message:
+        return bot.reply_to(
+            message,
+            "Utilisation :\n"
+            "• `/broadcast votre texte`\n"
+            "• ou répondez à un message (texte/photo/vidéo) avec `/broadcast`"
+        )
+
+    # Ici, pas de liste d'abonnés → on envoie dans le même chat (minimal et sans changer le reste du code)
+    chat_id = message.chat.id
+
+    if len(args) > 1:  # texte direct
+        text_to_send = args[1].strip()
+        try:
+            bot.send_message(chat_id, text_to_send, parse_mode="HTML")
+            bot.reply_to(message, "✅ Message envoyé.")
+        except Exception as e:
+            bot.reply_to(message, f"❌ Échec d'envoi : {e}")
+    else:  # copie du message répondu (préserve média & légende)
+        src = message.reply_to_message
+        try:
+            bot.copy_message(chat_id, src.chat.id, src.message_id)
+            bot.reply_to(message, "✅ Message copié.")
+        except Exception as e:
+            bot.reply_to(message, f"❌ Échec de copie : {e}")
+
+# /whoami — affiche ton ID et si tu es admin
+@bot.message_handler(commands=['whoami'])
+def whoami(message):
+    is_admin = getattr(config, "is_admin", None)
+    admin_flag = False
+    if callable(is_admin):
+        try:
+            admin_flag = bool(is_admin(message.from_user.id))
+        except Exception:
+            admin_flag = False
+    bot.reply_to(message, f"Ton ID: {message.from_user.id}\nAdmin: {admin_flag}")
+
+# -----------------------------------------------------------------
 
 # --- Lancement ---
 def run_flask():
